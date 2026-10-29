@@ -9,6 +9,7 @@ local UserInputService  = game:GetService("UserInputService")
 local TweenService      = game:GetService("TweenService")
 local Workspace         = game:GetService("Workspace")
 local StarterGui        = game:GetService("StarterGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LP  = Players.LocalPlayer
 local CAM = Workspace.CurrentCamera
@@ -23,7 +24,6 @@ end
 --  CONFIG
 --==============================================================
 local Config = {
-    -- ESP
     ESPEnabled      = true,
     ESPInnocent     = true,
     ESPSheriff      = true,
@@ -37,7 +37,6 @@ local Config = {
     HideMurderOnNewSheriff = true,
     Notifications   = true,
 
-    -- Player
     Speed           = 32,
     JumpPower       = 60,
     Noclip          = false,
@@ -46,18 +45,15 @@ local Config = {
     InfiniteJump    = false,
     DoubleJump      = false,
 
-    -- FOV
     FOVEnabled      = false,
     FOVSize         = 120,
     FOVColor        = Color3.fromRGB(0, 150, 255),
     FOVRGB          = false,
     FOVRGBSpeed     = 1,
 
-    -- Headlock
     Headlock        = false,
     HeadlockInFOV   = true,
 
-    -- Viewmodel
     VMEnabled       = false,
     VMHide          = false,
     VMSize          = 1,
@@ -65,16 +61,19 @@ local Config = {
     VMColor         = Color3.fromRGB(200, 200, 200),
     VMTexture       = "",
 
-    -- Crosshair
     Crosshair       = false,
     CrosshairId     = "6031091004",
     CrosshairSize   = 24,
     CrosshairOffsetY = 0,
     CrosshairSpin   = false,
     CrosshairSpinSpeed = 90,
+
+    Aimbot          = false,
+    AimbotKey       = true,
+    KillAllKey      = true,
 }
 
-local Roles   = {}   -- [player] = "Innocent" | "Sheriff" | "Murder"
+local Roles   = {}
 local ESPData = {}
 local HideMurder = false
 
@@ -140,13 +139,10 @@ local function notify(title, content)
     pcall(function()
         Sirius:Notify({ Title = title, Content = content, Duration = 5 })
     end)
-    pcall(function()
-        StarterGui:SetCore("SendNotification", { Title = title, Text = content, Duration = 5 })
-    end)
 end
 
 --==============================================================
---  DETECÇÃO DE CARGO
+--  DETECÇÃO DE CARGO (Tool + GetPlayerData)
 --==============================================================
 local KNIFE_NAMES = { Knife = true, ["Silver Knife"] = true }
 local GUN_NAMES   = { Gun = true, Revolver = true, ["Silver Gun"] = true }
@@ -167,40 +163,73 @@ local function getToolName(plr)
     return nil
 end
 
+local function getRoleDataRemote()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local extras  = remotes and remotes:FindFirstChild("Extras")
+    return extras and extras:FindFirstChild("GetPlayerData")
+end
+
+local function fetchRolesRemote()
+    local remote = getRoleDataRemote()
+    if not remote then return nil end
+    local ok, data = pcall(function() return remote:InvokeServer() end)
+    if ok and type(data) == "table" then return data end
+    return nil
+end
+
 local function scanRoles()
     local foundMurder, foundSheriff
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LP then
-            local tool = getToolName(plr)
-            if tool then
-                if KNIFE_NAMES[tool] then
+
+    local data = fetchRolesRemote()
+    if data then
+        for name, info in pairs(data) do
+            local plr = Players:FindFirstChild(name)
+            if plr and plr ~= LP and type(info) == "table" then
+                if info.Role == "Murderer" then
                     foundMurder = plr
                     Roles[plr] = "Murder"
-                elseif GUN_NAMES[tool] and plr ~= foundMurder then
+                elseif info.Role == "Sheriff" then
                     foundSheriff = plr
                     Roles[plr] = "Sheriff"
+                elseif info.Role == "Innocent" then
+                    Roles[plr] = "Innocent"
+                end
+            end
+        end
+    end
+
+    if not foundMurder and not foundSheriff then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LP then
+                local tool = getToolName(plr)
+                if tool then
+                    if KNIFE_NAMES[tool] then
+                        foundMurder = plr
+                        Roles[plr] = "Murder"
+                    elseif GUN_NAMES[tool] and plr ~= foundMurder then
+                        foundSheriff = plr
+                        Roles[plr] = "Sheriff"
+                    else
+                        Roles[plr] = Roles[plr] or "Innocent"
+                    end
                 else
                     Roles[plr] = Roles[plr] or "Innocent"
                 end
-            else
-                Roles[plr] = "Innocent"
             end
         end
     end
 
     local oldMurder, oldSheriff = Roles.__murder, Roles.__sheriff
 
-    -- Murder morreu / sumiu -> reseta e espera o próximo com faca
     if oldMurder and foundMurder ~= oldMurder then
         Roles.__murder = nil
         HideMurder = false
         notify("Murder morreu", "Aguardando o novo Murder aparecer com a faca...")
-        for p, d in pairs(ESPData) do
+        for p in pairs(ESPData) do
             if Roles[p] == "Murder" then removeESP(p) end
         end
     end
 
-    -- Sheriff mudou
     if foundSheriff ~= oldSheriff then
         if oldSheriff then
             notify("Sheriff morreu", "ESP do Sheriff removido. Aguardando o novo.")
@@ -208,9 +237,7 @@ local function scanRoles()
         Roles.__sheriff = foundSheriff
         if foundSheriff then
             notify("Sheriff encontrado", foundSheriff.Name .. " está armado.")
-            if Config.HideMurderOnNewSheriff then
-                HideMurder = true
-            end
+            if Config.HideMurderOnNewSheriff then HideMurder = true end
         end
     end
 
@@ -307,14 +334,13 @@ local function hsvRGB(speed)
 end
 
 --==============================================================
---  LOOP PRINCIPAL (ESP + FOV)
+--  LOOP ESP / FOV
 --==============================================================
 RunService.RenderStepped:Connect(function()
     local cam = Workspace.CurrentCamera
     if not cam then return end
     local vp = cam.ViewportSize
 
-    -- FOV
     if FovCircle then
         FovCircle.Position = Vector2.new(vp.X / 2, vp.Y / 2)
         FovCircle.Radius = Config.FOVSize
@@ -322,7 +348,6 @@ RunService.RenderStepped:Connect(function()
         FovCircle.Visible = Config.FOVEnabled
     end
 
-    -- ESP
     for plr, data in pairs(ESPData) do
         local char = plr.Character
         local hrp  = char and char:FindFirstChild("HumanoidRootPart")
@@ -338,7 +363,6 @@ RunService.RenderStepped:Connect(function()
 
         local col = roleColor(Roles[plr])
 
-        -- Highlight
         if data.Highlight then
             if show and Config.ESPHighlight then
                 if data.Highlight.Parent ~= char then data.Highlight.Parent = char end
@@ -350,7 +374,6 @@ RunService.RenderStepped:Connect(function()
             end
         end
 
-        -- Box / Line / Name
         if show and head and hrp then
             local topPos    = head.Position + Vector3.new(0, 0.55, 0)
             local bottomPos = hrp.Position - Vector3.new(0, hum.HipHeight + 0.6, 0)
@@ -402,13 +425,10 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
---==============================================================
---  SCAN LOOP
---==============================================================
 task.spawn(function()
     while true do
         pcall(scanRoles)
-        task.wait(0.3)
+        task.wait(0.5)
     end
 end)
 
@@ -431,7 +451,7 @@ RunService:BindToRenderStep("VeniceHeadlock", Enum.RenderPriority.Camera.Value +
     if not head or not hum or hum.Health <= 0 then return end
 
     local cam = Workspace.CurrentCamera
-    local screen, onScreen = cam:WorldToViewportPoint(head.Position)
+    local screen = cam:WorldToViewportPoint(head.Position)
 
     if Config.HeadlockInFOV then
         local vp = cam.ViewportSize
@@ -443,6 +463,76 @@ RunService:BindToRenderStep("VeniceHeadlock", Enum.RenderPriority.Camera.Value +
 
     cam.CFrame = CFrame.lookAt(cam.CFrame.Position, head.Position)
 end)
+
+--==============================================================
+--  KILL ALL
+--==============================================================
+local function killAll()
+    local char = LP.Character
+    local knife = char and char:FindFirstChild("Knife")
+    local events = knife and knife:FindFirstChild("Events")
+    local handleTouched = events and events:FindFirstChild("HandleTouched")
+
+    if not handleTouched then
+        notify("Kill All", "Você precisa estar com a faca na mão.")
+        return
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character then
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                pcall(function() handleTouched:FireServer(hrp) end)
+                task.wait(0.05)
+            end
+        end
+    end
+    notify("Kill All", "Faca enviada em todos os jogadores.")
+end
+
+--==============================================================
+--  AIMBOT (headshot no Murder)
+--==============================================================
+local aimTarget = nil
+
+task.spawn(function()
+    while true do
+        task.wait(0.15)
+        if Config.Aimbot then
+            local m = Roles.__murder
+            local hrp = m and getHRP(m)
+            local hum = m and getHum(m)
+            aimTarget = (hrp and hum and hum.Health > 0) and hrp or nil
+        else
+            aimTarget = nil
+        end
+    end
+end)
+
+local function getShootRemote()
+    local char = LP.Character
+    local bp = LP:FindFirstChildOfClass("Backpack")
+    local gun = (char and char:FindFirstChild("Gun")) or (bp and bp:FindFirstChild("Gun"))
+    return gun and gun:FindFirstChild("Shoot", true)
+end
+
+if hookmetamethod and getnamecallmethod then
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        if Config.Aimbot and aimTarget and method == "FireServer" then
+            local shoot = getShootRemote()
+            if shoot and self == shoot then
+                local args = { ... }
+                args[1] = aimTarget.CFrame + Vector3.new(0, 3, 0)
+                args[2] = aimTarget.CFrame
+                return oldNamecall(self, unpack(args))
+            end
+        end
+        return oldNamecall(self, ...)
+    end)
+end
 
 --==============================================================
 --  PLAYER
@@ -457,7 +547,7 @@ local function applyJump()
     if hum then hum.JumpPower = Config.JumpPower end
 end
 
-LP.CharacterAdded:Connect(function(char)
+LP.CharacterAdded:Connect(function()
     task.wait(1)
     applySpeed()
     applyJump()
@@ -472,7 +562,6 @@ RunService.Stepped:Connect(function()
     end
 end)
 
--- Fly
 local flyBV, flyBG, flyConn
 local function stopFly()
     Config.Fly = false
@@ -512,7 +601,6 @@ local function startFly()
     end)
 end
 
--- Pulos
 local jumpCount = 0
 
 UserInputService.JumpRequest:Connect(function()
@@ -575,7 +663,6 @@ end)
 --==============================================================
 --  VIEWMODEL
 --==============================================================
-local vmConn
 local function applyViewmodel()
     local char = LP.Character
     if not char then return end
@@ -584,14 +671,10 @@ local function applyViewmodel()
     local handle = tool:FindFirstChild("Handle")
     if not handle then return end
 
-    if Config.VMHide then
-        handle.Transparency = 1
-    else
-        handle.Transparency = 0
-    end
+    handle.Transparency = Config.VMHide and 1 or 0
 
     if Config.VMEnabled then
-        handle.Size = handle.Size * 0 + Vector3.new(Config.VMSize, Config.VMSize, Config.VMSize) * 1
+        handle.Size = Vector3.new(Config.VMSize, Config.VMSize, Config.VMSize)
         handle.Color = Config.VMColor
         handle.Material = Enum.Material[Config.VMMaterial] or Enum.Material.Metal
         if Config.VMTexture ~= "" then
@@ -606,7 +689,7 @@ local function applyViewmodel()
     end
 end
 
-vmConn = RunService.Heartbeat:Connect(function()
+RunService.Heartbeat:Connect(function()
     if Config.VMEnabled or Config.VMHide then
         pcall(applyViewmodel)
     end
@@ -637,133 +720,30 @@ task.spawn(function()
     end
 end)
 
-ESPTab:CreateToggle({
-    Name = "ESP Ativado",
-    CurrentValue = true,
-    Flag = "espMaster",
-    Callback = function(v) Config.ESPEnabled = v end,
-})
-
-ESPTab:CreateToggle({
-    Name = "Inocentes (Verde)",
-    CurrentValue = true,
-    Callback = function(v) Config.ESPInnocent = v end,
-})
-
-ESPTab:CreateToggle({
-    Name = "Sheriff (Azul)",
-    CurrentValue = true,
-    Callback = function(v) Config.ESPSheriff = v end,
-})
-
-ESPTab:CreateToggle({
-    Name = "Murder (Vermelho)",
-    CurrentValue = true,
-    Callback = function(v) Config.ESPMurder = v end,
-})
+ESPTab:CreateToggle({ Name = "ESP Ativado", CurrentValue = true, Callback = function(v) Config.ESPEnabled = v end })
+ESPTab:CreateToggle({ Name = "Inocentes (Verde)", CurrentValue = true, Callback = function(v) Config.ESPInnocent = v end })
+ESPTab:CreateToggle({ Name = "Sheriff (Azul)", CurrentValue = true, Callback = function(v) Config.ESPSheriff = v end })
+ESPTab:CreateToggle({ Name = "Murder (Vermelho)", CurrentValue = true, Callback = function(v) Config.ESPMurder = v end })
 
 ESPTab:CreateSection("Estilo")
-
-ESPTab:CreateToggle({
-    Name = "Highlight",
-    CurrentValue = true,
-    Callback = function(v) Config.ESPHighlight = v end,
-})
-
-ESPTab:CreateToggle({
-    Name = "ESP BOX",
-    CurrentValue = false,
-    Callback = function(v) Config.ESPBox = v end,
-})
-
-ESPTab:CreateToggle({
-    Name = "ESP LINE",
-    CurrentValue = false,
-    Callback = function(v) Config.ESPLine = v end,
-})
-
-ESPTab:CreateToggle({
-    Name = "ESP NAME",
-    CurrentValue = false,
-    Callback = function(v) Config.ESPName = v end,
-})
-
-ESPTab:CreateToggle({
-    Name = "Limite de distância",
-    CurrentValue = true,
-    Callback = function(v) Config.ESPDistance = v end,
-})
-
-ESPTab:CreateSlider({
-    Name = "Distância máxima",
-    Range = { 50, 2000 },
-    Increment = 50,
-    Suffix = "m",
-    CurrentValue = 600,
-    Callback = function(v) Config.MaxDistance = v end,
-})
+ESPTab:CreateToggle({ Name = "Highlight", CurrentValue = true, Callback = function(v) Config.ESPHighlight = v end })
+ESPTab:CreateToggle({ Name = "ESP BOX", CurrentValue = false, Callback = function(v) Config.ESPBox = v end })
+ESPTab:CreateToggle({ Name = "ESP LINE", CurrentValue = false, Callback = function(v) Config.ESPLine = v end })
+ESPTab:CreateToggle({ Name = "ESP NAME", CurrentValue = false, Callback = function(v) Config.ESPName = v end })
+ESPTab:CreateToggle({ Name = "Limite de distância", CurrentValue = true, Callback = function(v) Config.ESPDistance = v end })
+ESPTab:CreateSlider({ Name = "Distância máxima", Range = { 50, 2000 }, Increment = 50, Suffix = "m", CurrentValue = 600, Callback = function(v) Config.MaxDistance = v end })
 
 --========================= PLAYER TAB =========================
 PlayerTab:CreateSection("Movimento")
-
-PlayerTab:CreateSlider({
-    Name = "Speed",
-    Range = { 16, 200 },
-    Increment = 1,
-    Suffix = "ws",
-    CurrentValue = 32,
-    Callback = function(v)
-        Config.Speed = v
-        applySpeed()
-    end,
-})
-
-PlayerTab:CreateSlider({
-    Name = "Força do pulo",
-    Range = { 50, 250 },
-    Increment = 1,
-    CurrentValue = 60,
-    Callback = function(v)
-        Config.JumpPower = v
-        applyJump()
-    end,
-})
-
-PlayerTab:CreateToggle({
-    Name = "Noclip",
-    CurrentValue = false,
-    Callback = function(v) Config.Noclip = v end,
-})
-
-PlayerTab:CreateToggle({
-    Name = "Pulo infinito",
-    CurrentValue = false,
-    Callback = function(v) Config.InfiniteJump = v end,
-})
-
-PlayerTab:CreateToggle({
-    Name = "Pulo duplo",
-    CurrentValue = false,
-    Callback = function(v) Config.DoubleJump = v end,
-})
+PlayerTab:CreateSlider({ Name = "Speed", Range = { 16, 200 }, Increment = 1, Suffix = "ws", CurrentValue = 32, Callback = function(v) Config.Speed = v applySpeed() end })
+PlayerTab:CreateSlider({ Name = "Força do pulo", Range = { 50, 250 }, Increment = 1, CurrentValue = 60, Callback = function(v) Config.JumpPower = v applyJump() end })
+PlayerTab:CreateToggle({ Name = "Noclip", CurrentValue = false, Callback = function(v) Config.Noclip = v end })
+PlayerTab:CreateToggle({ Name = "Pulo infinito", CurrentValue = false, Callback = function(v) Config.InfiniteJump = v end })
+PlayerTab:CreateToggle({ Name = "Pulo duplo", CurrentValue = false, Callback = function(v) Config.DoubleJump = v end })
 
 PlayerTab:CreateSection("Fly")
-
-PlayerTab:CreateToggle({
-    Name = "Fly",
-    CurrentValue = false,
-    Callback = function(v)
-        if v then startFly() else stopFly() end
-    end,
-})
-
-PlayerTab:CreateSlider({
-    Name = "Velocidade do Fly",
-    Range = { 10, 250 },
-    Increment = 5,
-    CurrentValue = 60,
-    Callback = function(v) Config.FlySpeed = v end,
-})
+PlayerTab:CreateToggle({ Name = "Fly", CurrentValue = false, Callback = function(v) if v then startFly() else stopFly() end end })
+PlayerTab:CreateSlider({ Name = "Velocidade do Fly", Range = { 10, 250 }, Increment = 5, CurrentValue = 60, Callback = function(v) Config.FlySpeed = v end })
 
 --========================== TP TAB ============================
 local LobbyCF = CFrame.new(0, 25, 0)
@@ -780,17 +760,8 @@ local function tpTo(plr)
 end
 
 TPTab:CreateSection("Partida")
-
-TPTab:CreateButton({
-    Name = "Teleportar para o Murder",
-    Callback = function() tpTo(Roles.__murder) end,
-})
-
-TPTab:CreateButton({
-    Name = "Teleportar para o Sheriff",
-    Callback = function() tpTo(Roles.__sheriff) end,
-})
-
+TPTab:CreateButton({ Name = "Teleportar para o Murder", Callback = function() tpTo(Roles.__murder) end })
+TPTab:CreateButton({ Name = "Teleportar para o Sheriff", Callback = function() tpTo(Roles.__sheriff) end })
 TPTab:CreateButton({
     Name = "Teleportar para a partida",
     Callback = function()
@@ -807,7 +778,6 @@ TPTab:CreateButton({
 })
 
 TPTab:CreateSection("Lobby")
-
 TPTab:CreateButton({
     Name = "Teleportar para o Lobby",
     Callback = function()
@@ -822,7 +792,6 @@ TPTab:CreateButton({
         hrp.Velocity = Vector3.zero
     end,
 })
-
 TPTab:CreateInput({
     Name = "Definir posição do Lobby (X,Y,Z)",
     PlaceholderText = "0,25,0",
@@ -838,101 +807,251 @@ TPTab:CreateInput({
 
 --========================= AIM / FOV TAB =======================
 AimTab:CreateSection("Circle FOV")
-
-AimTab:CreateToggle({
-    Name = "Mostrar FOV",
-    CurrentValue = false,
-    Callback = function(v) Config.FOVEnabled = v end,
-})
-
-AimTab:CreateSlider({
-    Name = "Tamanho do FOV",
-    Range = { 30, 500 },
-    Increment = 5,
-    CurrentValue = 120,
-    Callback = function(v) Config.FOVSize = v end,
-})
-
-AimTab:CreateColorPicker({
-    Name = "Cor do FOV",
-    Color = Color3.fromRGB(0, 150, 255),
-    Callback = function(c) Config.FOVColor = c end,
-})
-
-AimTab:CreateToggle({
-    Name = "Modo RGB",
-    CurrentValue = false,
-    Callback = function(v) Config.FOVRGB = v end,
-})
-
-AimTab:CreateSlider({
-    Name = "Velocidade do RGB",
-    Range = { 0.1, 5 },
-    Increment = 0.1,
-    CurrentValue = 1,
-    Callback = function(v) Config.FOVRGBSpeed = v end,
-})
+AimTab:CreateToggle({ Name = "Mostrar FOV", CurrentValue = false, Callback = function(v) Config.FOVEnabled = v end })
+AimTab:CreateSlider({ Name = "Tamanho do FOV", Range = { 30, 500 }, Increment = 5, CurrentValue = 120, Callback = function(v) Config.FOVSize = v end })
+AimTab:CreateColorPicker({ Name = "Cor do FOV", Color = Color3.fromRGB(0, 150, 255), Callback = function(c) Config.FOVColor = c end })
+AimTab:CreateToggle({ Name = "Modo RGB", CurrentValue = false, Callback = function(v) Config.FOVRGB = v end })
+AimTab:CreateSlider({ Name = "Velocidade do RGB", Range = { 0.1, 5 }, Increment = 0.1, CurrentValue = 1, Callback = function(v) Config.FOVRGBSpeed = v end })
 
 AimTab:CreateSection("Headlock")
-
-AimTab:CreateToggle({
-    Name = "Headlock",
-    CurrentValue = false,
-    Callback = function(v) Config.Headlock = v end,
-})
-
-AimTab:CreateToggle({
-    Name = "Só dentro do FOV",
-    CurrentValue = true,
-    Callback = function(v) Config.HeadlockInFOV = v end,
-})
-
+AimTab:CreateToggle({ Name = "Headlock", CurrentValue = false, Callback = function(v) Config.Headlock = v end })
+AimTab:CreateToggle({ Name = "Só dentro do FOV", CurrentValue = true, Callback = function(v) Config.HeadlockInFOV = v end })
 AimTab:CreateLabel("Sheriff trava na head do Murder. Murder trava na head do Sheriff. Inocente trava na head do Murder.")
+
+AimTab:CreateSection("Combate")
+AimTab:CreateToggle({ Name = "Aimbot headshot (Murder)", CurrentValue = false, Callback = function(v) Config.Aimbot = v end })
+AimTab:CreateToggle({ Name = "Tecla K liga/desliga aimbot", CurrentValue = true, Callback = function(v) Config.AimbotKey = v end })
+AimTab:CreateButton({ Name = "KILL ALL (faca)", Callback = function() killAll() end })
+AimTab:CreateToggle({ Name = "Tecla L = Kill All", CurrentValue = true, Callback = function(v) Config.KillAllKey = v end })
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.L and Config.KillAllKey then
+        killAll()
+    elseif input.KeyCode == Enum.KeyCode.K and Config.AimbotKey then
+        Config.Aimbot = not Config.Aimbot
+        notify("Aimbot", Config.Aimbot and "Ativado" or "Desativado")
+    end
+end)
 
 --========================== VISUAL TAB =========================
 VisTab:CreateSection("Viewmodel")
+VisTab:CreateToggle({ Name = "Aplicar alterações", CurrentValue = false, Callback = function(v) Config.VMEnabled = v end })
+VisTab:CreateToggle({ Name = "Esconder arma", CurrentValue = false, Callback = function(v) Config.VMHide = v end })
+VisTab:CreateSlider({ Name = "Tamanho", Range = { 0.5, 5 }, Increment = 0.1, CurrentValue = 1, Callback = function(v) Config.VMSize = v end })
+VisTab:CreateDropdown({ Name = "Material", Options = { "Metal", "Plastic", "Neon", "ForceField", "Glass", "Wood" }, CurrentOption = { "Metal" }, Callback = function(opt) Config.VMMaterial = opt[1] end })
+VisTab:CreateColorPicker({ Name = "Cor", Color = Color3.fromRGB(200, 200, 200), Callback = function(c) Config.VMColor = c end })
+VisTab:CreateInput({ Name = "ID de textura", PlaceholderText = "123456789", RemoveTextAfterFocusLost = false, Callback = function(txt) Config.VMTexture = txt end })
 
-VisTab:CreateToggle({
-    Name = "Aplicar alterações",
-    CurrentValue = false,
-    Callback = function(v) Config.VMEnabled = v end,
-})
+--==============================================================
+--  SELETOR DE CROSSHAIR (grade com pré-visualização)
+--==============================================================
+local PRESETS = {
+    "1827745860", "10891594364", "5998624788", "5689419560", "2207556774",
+    "426730675", "2128690040", "2827093428", "3750055370", "11754490336",
+    "358650771", "6398507494", "749187669", "358650766", "3521125035",
+    "11351620355", "11721776729", "11722368344", "7905983439", "11722088774",
+    "10831379335", "11716290197", "11716557686", "10878218322", "11767037107",
+}
 
-VisTab:CreateToggle({
-    Name = "Esconder arma",
-    CurrentValue = false,
-    Callback = function(v) Config.VMHide = v end,
-})
+local pickerGui = Instance.new("ScreenGui")
+pickerGui.Name = "VeniceCrosshairPicker"
+pickerGui.ResetOnSpawn = false
+pickerGui.DisplayOrder = 999
+pickerGui.Enabled = false
+pickerGui.Parent = game:GetService("CoreGui")
 
-VisTab:CreateSlider({
-    Name = "Tamanho",
-    Range = { 0.5, 5 },
-    Increment = 0.1,
-    CurrentValue = 1,
-    Callback = function(v) Config.VMSize = v end,
-})
+local pickerMain = Instance.new("Frame")
+pickerMain.Size = UDim2.fromOffset(420, 460)
+pickerMain.Position = UDim2.new(0.5, -210, 0.5, -230)
+pickerMain.BackgroundColor3 = Color3.fromRGB(12, 24, 42)
+pickerMain.BorderSizePixel = 0
+pickerMain.Active = true
+pickerMain.Draggable = true
+pickerMain.Parent = pickerGui
 
-VisTab:CreateDropdown({
-    Name = "Material",
-    Options = { "Metal", "Plastic", "Neon", "ForceField", "Glass", "Wood" },
-    CurrentOption = { "Metal" },
-    Callback = function(opt) Config.VMMaterial = opt[1] end,
-})
+local pickerCorner = Instance.new("UICorner")
+pickerCorner.CornerRadius = UDim.new(0, 10)
+pickerCorner.Parent = pickerMain
 
-VisTab:CreateColorPicker({
-    Name = "Cor",
-    Color = Color3.fromRGB(200, 200, 200),
-    Callback = function(c) Config.VMColor = c end,
-})
+local pickerStroke = Instance.new("UIStroke")
+pickerStroke.Color = Color3.fromRGB(0, 132, 255)
+pickerStroke.Thickness = 2
+pickerStroke.Parent = pickerMain
 
-VisTab:CreateInput({
-    Name = "ID de textura",
-    PlaceholderText = "123456789",
-    RemoveTextAfterFocusLost = false,
-    Callback = function(txt) Config.VMTexture = txt end,
-})
+local pickerTitle = Instance.new("TextLabel")
+pickerTitle.Size = UDim2.new(1, -60, 0, 36)
+pickerTitle.Position = UDim2.fromOffset(14, 4)
+pickerTitle.BackgroundTransparency = 1
+pickerTitle.Text = "Selecionar Crosshair"
+pickerTitle.TextColor3 = Color3.fromRGB(235, 245, 255)
+pickerTitle.Font = Enum.Font.GothamBold
+pickerTitle.TextSize = 15
+pickerTitle.TextXAlignment = Enum.TextXAlignment.Left
+pickerTitle.Parent = pickerMain
 
+local pickerClose = Instance.new("TextButton")
+pickerClose.Size = UDim2.fromOffset(28, 28)
+pickerClose.Position = UDim2.new(1, -36, 0, 6)
+pickerClose.BackgroundColor3 = Color3.fromRGB(30, 55, 95)
+pickerClose.Text = "X"
+pickerClose.TextColor3 = Color3.fromRGB(255, 255, 255)
+pickerClose.Font = Enum.Font.GothamBold
+pickerClose.TextSize = 13
+pickerClose.BorderSizePixel = 0
+pickerClose.Parent = pickerMain
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(1, 14)
+closeCorner.Parent = pickerClose
+
+pickerClose.MouseButton1Click:Connect(function()
+    pickerGui.Enabled = false
+end)
+
+-- pré-visualização grande
+local bigPreview = Instance.new("Frame")
+bigPreview.Size = UDim2.fromOffset(120, 120)
+bigPreview.Position = UDim2.fromOffset(14, 46)
+bigPreview.BackgroundColor3 = Color3.fromRGB(22, 38, 62)
+bigPreview.BorderSizePixel = 0
+bigPreview.Parent = pickerMain
+
+local bigCorner = Instance.new("UICorner")
+bigCorner.CornerRadius = UDim.new(0, 8)
+bigCorner.Parent = bigPreview
+
+local bigImg = Instance.new("ImageLabel")
+bigImg.Size = UDim2.fromScale(0.82, 0.82)
+bigImg.Position = UDim2.fromScale(0.09, 0.09)
+bigImg.BackgroundTransparency = 1
+bigImg.ScaleType = Enum.ScaleType.Fit
+bigImg.Image = "rbxassetid://" .. Config.CrosshairId
+bigImg.Parent = bigPreview
+
+local idBox = Instance.new("TextBox")
+idBox.Size = UDim2.fromOffset(240, 34)
+idBox.Position = UDim2.fromOffset(148, 60)
+idBox.BackgroundColor3 = Color3.fromRGB(14, 28, 48)
+idBox.TextColor3 = Color3.fromRGB(220, 235, 255)
+idBox.PlaceholderText = "ID da textura"
+idBox.Font = Enum.Font.Gotham
+idBox.TextSize = 13
+idBox.Text = Config.CrosshairId
+idBox.BorderSizePixel = 0
+idBox.Parent = pickerMain
+
+local idCorner = Instance.new("UICorner")
+idCorner.CornerRadius = UDim.new(0, 6)
+idCorner.Parent = idBox
+
+local applyBtn = Instance.new("TextButton")
+applyBtn.Size = UDim2.fromOffset(240, 32)
+applyBtn.Position = UDim2.fromOffset(148, 102)
+applyBtn.BackgroundColor3 = Color3.fromRGB(0, 132, 255)
+applyBtn.Text = "Aplicar ID"
+applyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+applyBtn.Font = Enum.Font.GothamBold
+applyBtn.TextSize = 13
+applyBtn.BorderSizePixel = 0
+applyBtn.Parent = pickerMain
+
+local applyCorner = Instance.new("UICorner")
+applyCorner.CornerRadius = UDim.new(0, 6)
+applyCorner.Parent = applyBtn
+
+local function setCrosshair(id)
+    Config.CrosshairId = id
+    bigImg.Image = "rbxassetid://" .. id
+    idBox.Text = id
+    Config.Crosshair = true
+end
+
+applyBtn.MouseButton1Click:Connect(function()
+    local id = idBox.Text:gsub("%D", "")
+    if id ~= "" then setCrosshair(id) end
+end)
+
+-- grade de presets
+local gridScroll = Instance.new("ScrollingFrame")
+gridScroll.Size = UDim2.new(1, -28, 1, -190)
+gridScroll.Position = UDim2.fromOffset(14, 176)
+gridScroll.BackgroundTransparency = 1
+gridScroll.BorderSizePixel = 0
+gridScroll.ScrollBarThickness = 4
+gridScroll.ScrollBarImageColor3 = Color3.fromRGB(0, 132, 255)
+gridScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+gridScroll.CanvasSize = UDim2.new()
+gridScroll.Parent = pickerMain
+
+local grid = Instance.new("UIGridLayout")
+grid.CellSize = UDim2.fromOffset(74, 74)
+grid.CellPadding = UDim2.fromOffset(8, 8)
+grid.SortOrder = Enum.SortOrder.LayoutOrder
+grid.Parent = gridScroll
+
+for i, id in ipairs(PRESETS) do
+    local cell = Instance.new("TextButton")
+    cell.BackgroundColor3 = Color3.fromRGB(22, 38, 62)
+    cell.Text = ""
+    cell.BorderSizePixel = 0
+    cell.LayoutOrder = i
+    cell.AutoButtonColor = false
+    cell.Parent = gridScroll
+
+    local cellCorner = Instance.new("UICorner")
+    cellCorner.CornerRadius = UDim.new(0, 8)
+    cellCorner.Parent = cell
+
+    local cellStroke = Instance.new("UIStroke")
+    cellStroke.Color = (id == Config.CrosshairId) and Color3.fromRGB(0, 132, 255) or Color3.fromRGB(38, 62, 98)
+    cellStroke.Thickness = 2
+    cellStroke.Parent = cell
+
+    local img = Instance.new("ImageLabel")
+    img.Size = UDim2.fromScale(0.7, 0.7)
+    img.Position = UDim2.fromScale(0.15, 0.08)
+    img.BackgroundTransparency = 1
+    img.ScaleType = Enum.ScaleType.Fit
+    img.Image = "rbxassetid://" .. id
+    img.Parent = cell
+
+    local idLabel = Instance.new("TextLabel")
+    idLabel.Size = UDim2.new(1, 0, 0, 12)
+    idLabel.Position = UDim2.new(0, 0, 1, -13)
+    idLabel.BackgroundTransparency = 1
+    idLabel.Text = id
+    idLabel.TextColor3 = Color3.fromRGB(150, 180, 220)
+    idLabel.Font = Enum.Font.Gotham
+    idLabel.TextSize = 9
+    idLabel.TextScaled = false
+    idLabel.Parent = cell
+
+    cell.MouseEnter:Connect(function()
+        bigImg.Image = "rbxassetid://" .. id
+    end)
+
+    cell.MouseButton1Click:Connect(function()
+        setCrosshair(id)
+        for _, other in ipairs(gridScroll:GetChildren()) do
+            local s = other:FindFirstChildOfClass("UIStroke")
+            if s then
+                s.Color = Color3.fromRGB(38, 62, 98)
+            end
+        end
+        cellStroke.Color = Color3.fromRGB(0, 132, 255)
+    end)
+end
+
+--========================== VISUAL: crosshair ==================
 VisTab:CreateSection("Crosshair (Overlay)")
+
+VisTab:CreateButton({
+    Name = "Escolher crosshair (com pré-visualização)",
+    Callback = function()
+        pickerGui.Enabled = true
+    end,
+})
 
 VisTab:CreateToggle({
     Name = "Ativar crosshair",
@@ -945,7 +1064,13 @@ VisTab:CreateInput({
     PlaceholderText = "6031091004",
     CurrentValue = "6031091004",
     RemoveTextAfterFocusLost = false,
-    Callback = function(txt) Config.CrosshairId = txt end,
+    Callback = function(txt)
+        local id = txt:gsub("%D", "")
+        if id ~= "" then
+            Config.CrosshairId = id
+            bigImg.Image = "rbxassetid://" .. id
+        end
+    end,
 })
 
 VisTab:CreateSlider({
@@ -993,6 +1118,20 @@ SetTab:CreateToggle({
     Callback = function(v) Config.HideMurderOnNewSheriff = v end,
 })
 
+SetTab:CreateSection("Teclas")
+
+SetTab:CreateToggle({
+    Name = "Tecla L = Kill All",
+    CurrentValue = true,
+    Callback = function(v) Config.KillAllKey = v end,
+})
+
+SetTab:CreateToggle({
+    Name = "Tecla K = Aimbot",
+    CurrentValue = true,
+    Callback = function(v) Config.AimbotKey = v end,
+})
+
 SetTab:CreateSection("Sistema")
 
 SetTab:CreateButton({
@@ -1009,8 +1148,10 @@ SetTab:CreateButton({
         for p in pairs(ESPData) do removeESP(p) end
         Roles.__murder, Roles.__sheriff = nil, nil
         HideMurder = false
-        stopFly()
+        Config.Aimbot = false
+        Config.Headlock = false
         Config.Noclip = false
+        stopFly()
         notify("Reset", "Estado limpo.")
     end,
 })
@@ -1019,12 +1160,24 @@ SetTab:CreateButton({
     Name = "Unload",
     Callback = function()
         for p in pairs(ESPData) do removeESP(p) end
-        if FovCircle then FovCircle:Remove() end
+        if FovCircle then pcall(function() FovCircle:Remove() end) end
         if crossGui then crossGui:Destroy() end
+        if pickerGui then pickerGui:Destroy() end
         stopFly()
         RunService:UnbindFromRenderStep("VeniceHeadlock")
         Sirius:Destroy()
     end,
 })
 
-notify("Venice Hub", "Script carregado. Abra o menu e configure.")
+--==============================================================
+--  INICIALIZAÇÃO
+--==============================================================
+applySpeed()
+applyJump()
+
+task.spawn(function()
+    task.wait(2)
+    pcall(scanRoles)
+end)
+
+notify("Venice Hub", "Script carregado. Pressione K para aimbot, L para kill all.")
